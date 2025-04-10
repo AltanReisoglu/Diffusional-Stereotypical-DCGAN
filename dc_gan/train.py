@@ -15,6 +15,26 @@ def weights_init(m):
         nn.init.normal_(m.weight.data, 1.0, 0.02)
         nn.init.constant_(m.bias.data, 0)
 
+
+def save_generated_images(generator, diffusion, epoch, device, output_path, num_samples=16):
+    generator.eval()
+    with torch.no_grad():
+        # Rastgele birkaç gerçek resimle t oluştur
+        sample_images = next(iter(train_dataloaded))[0:num_samples].to(device)
+        t = diffusion.sample_timesteps(sample_images.shape[0]).to(device)
+        x_t, _ = diffusion.noise_images(sample_images, t)
+        fake_images = generator(x_t, t)
+
+        os.makedirs(output_path, exist_ok=True)
+        vutils.save_image(
+            fake_images,
+            os.path.join(output_path, f"fake_epoch_{epoch+1}.png"),
+            normalize=True,
+            nrow=int(num_samples**0.5),
+            value_range=(0, 1),
+        )
+     generator.train()   
+
 device="cuda"
 diffusion=Diffusion()
 net_gen=Generator().to(device)
@@ -129,13 +149,8 @@ def train(num_epochs,discriminator_net,generator_net,optimizerD,optimizerG,train
                     )
                 )
     generator_net.eval()
-    plot_images(
-        epoch,
-        output_path,
-        num_test_samples,
-        generator_net,
-        device,
-    )
+    save_generated_images(generator_net, diffusion, epoch, device, output_path, num_test_samples)
+    print("resimler_kaydedildi")
     generator_net.train()
 
 
