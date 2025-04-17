@@ -1,4 +1,4 @@
-from generator import Generator
+from generator import Generator,EMA
 from discriminator import Discriminator2
 from dataloader import train_dataloaded
 from addNoise import Diffusion
@@ -7,6 +7,8 @@ from torch import optim
 import torch
 from plot_images import plot_images
 from tqdm import tqdm
+from accelerate import Accelerator
+import copy
 def weights_init(m):
     classname = m.__class__.__name__
     if classname.find('Conv') != -1:
@@ -15,7 +17,9 @@ def weights_init(m):
         nn.init.normal_(m.weight.data, 1.0, 0.02)
         nn.init.constant_(m.bias.data, 0)
 
-
+device="cuda"
+import torchvision.utils as vutils
+import os
 def save_generated_images(generator, diffusion, epoch, device, output_path, num_samples=16):
     generator.eval()
     with torch.no_grad():
@@ -33,9 +37,7 @@ def save_generated_images(generator, diffusion, epoch, device, output_path, num_
             nrow=int(num_samples**0.5),
             value_range=(0, 1),
         )
-     generator.train()   
-
-device="cuda"
+    generator.train()
 diffusion=Diffusion()
 net_gen=Generator().to(device)
 net_disc=Discriminator2().to(device)
@@ -44,11 +46,19 @@ net_disc=Discriminator2().to(device)
 net_disc.apply(weights_init)
 
 def train(num_epochs,discriminator_net,generator_net,optimizerD,optimizerG,train_loader,fake_label,real_label,criterion,output_path,num_test_samples,device):
+    ema=EMA(0.995)
+    ema_model = copy.deepcopy(generator_net).eval().requires_grad_(False)
+    accelerator = Accelerator()
+    discriminator_net, generator_net, optimizerD, optimizerG, train_loader = accelerator.prepare(
+        discriminator_net, generator_net, optimizerD, optimizerG, train_loader
+    )
     num_batches = len(train_loader)
-
     for epoch in range(num_epochs):
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{num_epochs}]", leave=False)
+        
         for i, (real_images) in enumerate(loop):
+            
+            
             batch_size_real_imgs = real_images.shape[0]
 
             ############################
@@ -74,7 +84,7 @@ def train(num_epochs,discriminator_net,generator_net,optimizerD,optimizerG,train
             fake_label = torch.zeros_like(output,device=device)
             loss_disc_real = criterion(output, real_label)
             
-            loss_disc_real.backward()
+            accelerator.backward(loss_disc_real)
 
             D_x = output.mean().item()
 
@@ -92,7 +102,7 @@ def train(num_epochs,discriminator_net,generator_net,optimizerD,optimizerG,train
             output = discriminator_net(fake_images.detach()).view(-1, 1)
 
             loss_disc_fake = criterion(output, fake_label)
-            loss_disc_fake.backward()
+            accelerator.backward(loss_disc_fake)
 
             D_G_z1 = output.mean().item()
 
@@ -101,33 +111,19 @@ def train(num_epochs,discriminator_net,generator_net,optimizerD,optimizerG,train
 
             optimizerD.step()
 
-            ############################
-            # (2) Update Generator network: maximize log(D(G(z)))
-            ###########################
-
-            """ When we train the generator network we have to
-            freeze the discriminator network, as we have already trained it. """
 
             generator_net.zero_grad()
 
-            # Now, set Image Label vector values equal to 1
-            # To fool the Discriminator Network
-            
-
-            # After filling all labels with 1 (representing real labels), run discriminator network with fake images to fool it
-            # To classify real images (drawn from the training set) and fakes images (produced by the generator).
             output = discriminator_net(fake_images)
 
-            # And now after I tried to fool discriminator, check how much it was fooled.
-            # so to the extent above output does not match with "labels" variable (which were all filed up with 1)
-            # That will be the failure of Generator Network i.e. Generator Loss
             loss_generator = criterion(output, real_label)
 
-            loss_generator.backward()
+            accelerator.backward(loss_generator)
 
             D_G_z2 = output.mean().item()
 
             optimizerG.step()
+            ema.step_ema(ema_model, generator_net)
             loop.set_postfix({
             "Loss_D": loss_disc_total.item(),
             
@@ -148,10 +144,11 @@ def train(num_epochs,discriminator_net,generator_net,optimizerD,optimizerG,train
                         D_G_z2,
                     )
                 )
-    generator_net.eval()
-    save_generated_images(generator_net, diffusion, epoch, device, output_path, num_test_samples)
-    print("resimler_kaydedildi")
-    generator_net.train()
+        if accelerator.is_main_process:
+            generator_net.eval()
+            save_generated_images(ema_model, diffusion, epoch, device, output_path, num_test_samples)
+            print("resimler_kaydeidi")
+            generator_net.train()
 
 
 ##########################################
@@ -160,15 +157,15 @@ def train(num_epochs,discriminator_net,generator_net,optimizerD,optimizerG,train
 
 batch_size = 32
 
-output_path = "/content/"
+output_path = "content"
 
 
 # loss function
 criterion = nn.BCELoss()
 
 # optimizers
-optimizerD = optim.Adam(net_disc.parameters(), lr=0.001,betas=(0.5,0.999))
-optimizerG = optim.Adam(net_gen.parameters(), lr=0.001,betas=(0.5,0.999))
+optimizerD = optim.Adam(net_disc.parameters(), lr=0.0001)
+optimizerG = optim.Adam(net_gen.parameters(), lr=0.0001)
 
 # initialize variables required for training
 real_label = 1.0
